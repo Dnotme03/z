@@ -25,7 +25,7 @@ class Config:
     API1_URL: str = os.getenv("API1_URL", "")
     API2_URL: str = os.getenv("API2_URL", "")
     API2_KEY: str = os.getenv("API2_KEY", "")
-    OWNER_ID: int = int(os.getenv("OWNER_ID", "0"))
+    OWNER_ID: int = int(os.getenv("OWNER_ID", ""))
     ADMIN_IDS: List[int] = field(default_factory=lambda: [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()])
     APPROVAL_PASSWORD: str = os.getenv("APPROVAL_PASSWORD", "dkint2024")
     CSV_DIR: str = "csv"
@@ -95,6 +95,12 @@ def escape_md(text: str) -> str:
         text = text.replace(char, '\\' + char)
     return text
 
+def clean_value(val: str) -> str:
+    val = str(val).strip()
+    val = val.replace('"', '').replace('"', '')
+    val = ' '.join(val.split())
+    return val
+
 class CSVLoader:
     def __init__(self):
         self.datasets: List[Dict[str, str]] = []
@@ -122,7 +128,7 @@ class CSVLoader:
             try:
                 with open(filepath, "r", encoding="utf-8-sig") as f:
                     for row in csv.DictReader(f):
-                        normalized = {normalize_field(k): v.strip() if v else "" for k, v in row.items()}
+                        normalized = {normalize_field(k): clean_value(v) for k, v in row.items()}
                         if "mobile" in normalized:
                             normalized["mobile"] = clean_number(normalized["mobile"])
                         records.append(normalized)
@@ -145,7 +151,10 @@ class APIClient:
                     data = await resp.json()
                     result = data.get("data", {})
                     if result:
-                        normalized = {normalize_field(k): v for k, v in result.items()}
+                        normalized = {}
+                        for k, v in result.items():
+                            nk = normalize_field(k)
+                            normalized[nk] = clean_value(str(v)) if v else ""
                         normalized["_source"] = "api1"
                         return normalized
         except Exception as e:
@@ -158,12 +167,17 @@ class APIClient:
                     data = await resp.json()
                     results = data.get("results", [])
                     if results:
-                        normalized_results = []
+                        filtered = []
                         for item in results:
-                            normalized = {normalize_field(k): v for k, v in item.items()}
-                            normalized["_source"] = "api2"
-                            normalized_results.append(normalized)
-                        return normalized_results
+                            item_mobile = clean_number(item.get("mobile", ""))
+                            if item_mobile == number:
+                                normalized = {}
+                                for k, v in item.items():
+                                    nk = normalize_field(k)
+                                    normalized[nk] = clean_value(str(v)) if v else ""
+                                normalized["_source"] = "api2"
+                                filtered.append(normalized)
+                        return filtered if filtered else None
         except Exception as e:
             logger.error(f"API2 error for {number}: {e}")
         return None
@@ -179,16 +193,37 @@ class MergeEngine:
             for key, value in record.items():
                 if key.startswith("_"):
                     continue
-                if not value or str(value).strip() in ("", " ", "null", "none"):
+                if not value or str(value).strip() in ("", " ", "null", "none", "na"):
                     continue
                 merged[key].add(str(value).strip())
         output = {}
         for key, values in merged.items():
-            cleaned = {v for v in values if v}
-            if len(cleaned) == 1:
-                output[key] = cleaned.pop()
-            elif len(cleaned) > 1:
-                output[key] = sorted(cleaned)
+            cleaned = {v for v in values if v and not v.startswith("!") and len(v) > 1}
+            if len(cleaned) == 0:
+                continue
+            sorted_vals = sorted(cleaned, key=lambda x: (len(x), x))
+            best = sorted_vals[0]
+            for v in sorted_vals:
+                if len(v) >= len(best) and len(v.split()) >= len(best.split()):
+                    best = v
+            if len(sorted_vals) == 1 or all(v == sorted_vals[0] for v in sorted_vals):
+                output[key] = best
+            else:
+                meaningful = [v for v in sorted_vals if len(v) > 3 and not v.startswith("!")]
+                if len(meaningful) == 1:
+                    output[key] = meaningful[0]
+                elif len(meaningful) > 1:
+                    unique_meaningful = []
+                    seen_vals = set()
+                    for v in meaningful:
+                        v_clean = v.lower().replace(" ", "")
+                        if v_clean not in seen_vals:
+                            seen_vals.add(v_clean)
+                            unique_meaningful.append(v)
+                    if len(unique_meaningful) == 1:
+                        output[key] = unique_meaningful[0]
+                    else:
+                        output[key] = unique_meaningful
         return output, len(seen_sources)
 
 csv_loader = CSVLoader()
@@ -227,26 +262,43 @@ def format_telegram_output(data: Dict[str, Any]) -> str:
         return "🔍 *DKINT Search Results*\n\nQuery: `" + escape_md(data['query']) + "`\nStatus: ❌ Not Found\nNo records found in any source."
     record = data.get("record", {})
     lines = ["🔍 *DKINT Search Results*", "━━━━━━━━━━━━━━━━━━━━━", "**Developer:** " + escape_md(config.DEVELOPER_TAG), "**Query:** `" + escape_md(data['query']) + "`", "**Status:** ✅ " + escape_md(data['status'].upper()), "**Sources Found:** " + str(data['sources_found']), "━━━━━━━━━━━━━━━━━━━━━"]
+    field_labels = {
+        "name": "Name", "mobile": "Mobile", "father_name": "Father Name",
+        "id": "ID", "operator": "Operator", "connection": "Connection",
+        "circle": "Circle", "gender": "Gender", "email": "Email",
+        "alternate_mobile": "Alternate Mobile", "address": "Address",
+        "hometown": "Hometown", "country": "Country", "language": "Language",
+        "ip_address": "IP Address", "imei": "IMEI", "mac_address": "MAC Address",
+        "reference_city": "Reference City", "tracker_id": "Tracker ID",
+        "tracking_history": "Tracking History", "mobile_locations": "Mobile Locations",
+        "tower_locations": "Tower Locations", "personality": "Personality",
+        "complaints": "Complaints", "branch": "Branch",
+    }
     priority = ["name","mobile","father_name","id","operator","connection","circle","gender","email","alternate_mobile","address","hometown","country","language","ip_address","imei","mac_address","reference_city","tracker_id","tracking_history"]
     added = set()
     for key in priority:
         if key in record:
             val = record[key]
-            label = escape_md(key.replace("_"," ").title())
+            label = escape_md(field_labels.get(key, key.replace("_"," ").title()))
             if isinstance(val, list):
-                items = "\n".join("  \\- " + escape_md(v) for v in val)
+                items = "\n".join("  \\- " + escape_md(v) for v in val[:5])
+                if len(val) > 5:
+                    items += f"\n  \\- *+{len(val)-5} more*"
                 lines.append(f"**{label}:**\n{items}")
             else:
                 lines.append(f"**{label}:** {escape_md(str(val))}")
             added.add(key)
     for key, val in record.items():
         if key not in added and not key.startswith("_"):
-            label = escape_md(key.replace("_"," ").title())
+            label = escape_md(field_labels.get(key, key.replace("_"," ").title()))
             if isinstance(val, list):
-                items = "\n".join("  \\- " + escape_md(v) for v in val)
+                items = "\n".join("  \\- " + escape_md(v) for v in val[:5])
+                if len(val) > 5:
+                    items += f"\n  \\- *+{len(val)-5} more*"
                 lines.append(f"**{label}:**\n{items}")
             else:
                 lines.append(f"**{label}:** {escape_md(str(val))}")
+            added.add(key)
     lines.extend(["━━━━━━━━━━━━━━━━━━━━━", "📱 Generated by: @" + escape_md(config.BOT_USERNAME)])
     return "\n".join(lines)
 
