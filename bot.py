@@ -22,9 +22,9 @@ load_dotenv()
 @dataclass
 class Config:
     BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
-    API1_URL: str = os.getenv("API1_URL", "https://apis.nuviac.io/api/phone")
-    API2_URL: str = os.getenv("API2_URL", "https://nv6.ek4nsh.in/api/proxy")
-    API2_KEY: str = os.getenv("API2_KEY", "nightroot")
+    API1_URL: str = os.getenv("API1_URL", "")
+    API2_URL: str = os.getenv("API2_URL", "")
+    API2_KEY: str = os.getenv("API2_KEY", "")
     OWNER_ID: int = int(os.getenv("OWNER_ID", "0"))
     ADMIN_IDS: List[int] = field(default_factory=lambda: [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()])
     APPROVAL_PASSWORD: str = os.getenv("APPROVAL_PASSWORD", "dkint2024")
