@@ -1,0 +1,8 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "python bot.py"
+
+[environments.production.variables]
+PYTHON_VERSION = "3.13.13"
