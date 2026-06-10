@@ -7,7 +7,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 import aiohttp
 from aiogram import Bot, Dispatcher, F, Router
@@ -22,13 +22,14 @@ class Config:
     API1_URL: str = os.getenv("API1_URL","https://apis.nuviac.io/api/phone")
     API2_URL: str = os.getenv("API2_URL","https://nv6.ek4nsh.in/api/proxy")
     API2_KEY: str = os.getenv("API2_KEY","nightroot")
+    TRUECALLER_API: str = os.getenv("TRUECALLER_API","https://truecalleranshapi.vercel.app/truecaller?number=+91")
     BOT_PASSWORD: str = os.getenv("BOT_PASSWORD","mkdirhome")
     CSV_DIR: str = os.getenv("CSV_DIR","csv")
     CSV_FILES: List[str] = field(default_factory=lambda:[x.strip() for x in os.getenv("CSV_FILES","db1.csv,db2.csv,db3.csv,db4.csv,db5.csv").split(",") if x.strip()])
     REQUEST_TIMEOUT: int = int(os.getenv("REQUEST_TIMEOUT","15"))
     AUTO_DELETE_SECONDS: int = int(os.getenv("AUTO_DELETE","60"))
-    DEVELOPER_TAG: str = os.getenv("DEVELOPER_TAG","@D4RKKlNG")
-    PROTECTED_NUMBERS: List[str] = field(default_factory=lambda:[x.strip() for x in os.getenv("PROTECTED_NUMBERS","9809098789,0000000000").split(",") if x.strip()])
+    DEVELOPER: str = "@D4RKKlNG"
+    PROTECTED_NUMBERS: List[str] = field(default_factory=lambda:[x.strip() for x in os.getenv("PROTECTED_NUMBERS","0000000000").split(",") if x.strip()])
     def __post_init__(self):
         if not self.BOT_TOKEN: raise ValueError("BOT_TOKEN required!")
 config=Config()
@@ -41,7 +42,7 @@ if AUTH_FILE.exists():
     try:
         with open(AUTH_FILE) as f:
             authorized_users=set(json.load(f))
-        logger.info(f"Loaded {len(authorized_users)} authorized users")
+        logger.info(f"Loaded {len(authorized_users)} users")
     except: pass
 
 def save_auth():
@@ -52,6 +53,18 @@ def clean_num(n):
     n=n.strip().replace(" ","").replace("-","").replace("+","")
     if n.startswith("91") and len(n)>10: n=n[2:]
     return "".join(c for c in n if c.isdigit())
+
+def clr(v):
+    if v is None: return ""
+    v=str(v).strip().strip('"').strip('"').strip("'")
+    return " ".join(v.split())
+
+def esc_md(s):
+    if not s: return ""
+    s=str(s)
+    for c in ['_','*','[',']','(',')','~','`','>','#','+','-','=','|','{','}','.','!']:
+        s=s.replace(c,'\\'+c)
+    return s
 
 FNORM={
     "number":"mobile","owner name":"name","owner address":"address",
@@ -65,15 +78,33 @@ FNORM={
     "fname":"father_name","id":"id","circle":"circle","address":"address",
     "email":"email","alt":"alternate_mobile","号码":"mobile",
     "运营商":"operator","姓名":"name","少量性别":"gender",
-    "开卡网点":"branch","邮箱":"email",
+    "开卡网点":"branch","邮箱":"email","sim":"sim","timestamp":"timestamp","success":"success",
 }
 def nf(f):
     k=f.strip().lower()
     return FNORM.get(k,k.replace(" ","_").replace("-","_"))
 
-def clr(v):
-    v=str(v).strip().strip('"').strip('"').strip("'")
-    return " ".join(v.split())
+FIELD_LABELS={
+    "name":"Name","mobile":"Mobile","father_name":"Father Name","id":"ID",
+    "operator":"Operator","connection":"Connection","circle":"Circle",
+    "gender":"Gender","email":"Email","alternate_mobile":"Alternate Mobile",
+    "address":"Address","hometown":"Hometown","country":"Country",
+    "language":"Language","ip_address":"IP Address","imei":"IMEI",
+    "mac_address":"MAC Address","reference_city":"Reference City",
+    "tracker_id":"Tracker ID","tracking_history":"Tracking History",
+    "mobile_locations":"Mobile Locations","tower_locations":"Tower Locations",
+    "personality":"Personality","complaints":"Complaints","branch":"Branch",
+    "sim":"SIM","timestamp":"Timestamp","success":"Success",
+}
+
+def fmt_record(rec):
+    parts=[]
+    for k,v in rec.items():
+        if k.startswith("_") or k in ("developer","developed_by"): continue
+        if not v or str(v).strip() in (""," ","null","none","na","-"): continue
+        lbl=FIELD_LABELS.get(k,k.replace("_"," ").title())
+        parts.append(f"  **{lbl}:** {esc_md(str(v))}")
+    return "\n".join(parts)
 
 class CSVLoader:
     def __init__(self):
@@ -88,7 +119,7 @@ class CSVLoader:
             recs=await self._load(fp)
             self.datasets.extend(recs)
             total+=len(recs)
-        logger.info(f"CSV: {total} records loaded")
+        logger.info(f"CSV: {total} records")
         return total
     async def _load(self,fp):
         loop=asyncio.get_event_loop()
@@ -118,15 +149,9 @@ class APIClient:
                 if r.status==200:
                     d=await r.json()
                     dd=d.get("data",{})
-                    if dd:
-                        n={}
-                        for k,v in dd.items():
-                            nk=nf(k)
-                            n[nk]=clr(str(v)) if v else ""
-                        n["_source"]="api1"
-                        return n
+                    if dd: return {nf(k):clr(str(v)) if v else "" for k,v in dd.items()}
         except Exception as e:
-            logger.error(f"API1 error: {e}")
+            logger.error(f"API1: {e}")
         return None
     async def api2(self,num):
         try:
@@ -135,52 +160,25 @@ class APIClient:
                     d=await r.json()
                     results=d.get("results",[])
                     if results:
-                        filtered=[]
-                        for item in results:
-                            im=clean_num(item.get("mobile",""))
-                            if im==num:
-                                n={}
-                                for k,v in item.items():
-                                    nk=nf(k)
-                                    n[nk]=clr(str(v)) if v else ""
-                                n["_source"]="api2"
-                                filtered.append(n)
-                        return filtered if filtered else None
+                        return [{nf(k):clr(str(v)) if v else "" for k,v in item.items()} for item in results if clean_num(item.get("mobile",""))==num]
         except Exception as e:
-            logger.error(f"API2 error: {e}")
+            logger.error(f"API2: {e}")
         return None
-
-class Merger:
-    @staticmethod
-    def merge(records):
-        merged=defaultdict(set)
-        seen=set()
-        for rec in records:
-            seen.add(rec.get("_source","csv"))
-            for k,v in rec.items():
-                if k.startswith("_"): continue
-                v=str(v).strip()
-                if not v or v.lower() in (""," ","null","none","na","-"): continue
-                merged[k].add(v)
-        out={}
-        for key,vals in merged.items():
-            cleaned=sorted({v for v in vals if v and len(v)>1 and not v.startswith("!")},key=lambda x:(len(x),x))
-            if not cleaned: continue
-            nonstar=[v for v in cleaned if not all(c=='*' or c=='.' or c=='x' for c in v.replace("x","").replace("*","").replace(".",""))]
-            if nonstar: cleaned=nonstar
-            unique=[]
-            seen2=set()
-            for v in cleaned:
-                kl=v.lower().replace(" ","").replace(".","").replace("-","")
-                if kl not in seen2:
-                    seen2.add(kl)
-                    unique.append(v)
-            if len(unique)==1: out[key]=unique[0]
-            elif len(unique)>1:
-                cnames=[v for v in unique if len(v)>3 and not any(c.isdigit() for c in v.replace(" ",""))]
-                if cnames: unique=cnames
-                out[key]=unique
-        return out,len(seen)
+    async def truecaller(self,num):
+        try:
+            url=f"{config.TRUECALLER_API}{num}"
+            async with self.session.get(url,timeout=self.to) as r:
+                if r.status==200:
+                    d=await r.json()
+                    if isinstance(d,dict) and d:
+                        processed={}
+                        for k,v in d.items():
+                            nk=nf(k)
+                            processed[nk]=clr(str(v)) if v else ""
+                        return processed
+        except Exception as e:
+            logger.error(f"Truecaller: {e}")
+        return None
 
 csvl=CSVLoader()
 async def init_search():
@@ -189,35 +187,116 @@ async def init_search():
 async def search_all(num):
     num=clean_num(num)
     if num in config.PROTECTED_NUMBERS:
-        return {"status":"protected","query":num,"data":{},"developed_by":config.DEVELOPER_TAG}
-    all_recs=[]
+        result={
+            "developer":config.DEVELOPER,
+            "query":num,
+            "status":"protected",
+            "sources":{},
+            "raw_json":json.dumps({"developer":config.DEVELOPER,"status":"protected","query":num,"message":"Protected number"},indent=2,ensure_ascii=False)
+        }
+        return result
+    sources={}
     async with aiohttp.ClientSession() as s:
         api=APIClient(s)
         t1=api.api1(num)
         t2=api.api2(num)
-        for r in csvl.search(num):
-            r["_source"]="csv"
-            all_recs.append(r)
-        r1,r2=await asyncio.gather(t1,t2,return_exceptions=True)
-        if isinstance(r1,dict) and r1: all_recs.append(r1)
-        if isinstance(r2,list) and r2: all_recs.extend(r2)
-    if not all_recs:
-        return {"status":"not_found","query":num,"data":{},"developed_by":config.DEVELOPER_TAG}
-    md,sc=Merger.merge(all_recs)
-    for key in list(md.keys()):
-        val=md[key]
-        if isinstance(val,list):
-            seen_set=set()
-            clean_list=[]
-            for item in val:
-                norm=item.lower().replace(" ","").replace(".","").replace("-","").replace("(","").replace(")","").replace("!","")
-                if norm not in seen_set and len(norm)>2:
-                    seen_set.add(norm)
-                    clean_list.append(item)
-            if len(clean_list)==1: md[key]=clean_list[0]
-            elif len(clean_list)>1: md[key]=clean_list[:5]
-            else: del md[key]
-    return {"status":"success","query":num,"data":md,"developed_by":config.DEVELOPER_TAG}
+        t3=api.truecaller(num)
+        csv_records=csvl.search(num)
+        if csv_records: sources["csv_database"]=csv_records
+        r1,r2,r3=await asyncio.gather(t1,t2,t3,return_exceptions=True)
+        if isinstance(r1,dict) and r1:
+            r1["_developer"]=config.DEVELOPER
+            sources["api_v1"]=r1
+        if isinstance(r2,list) and r2:
+            for item in r2: item["_developer"]=config.DEVELOPER
+            sources["api_v2"]=r2
+        if isinstance(r3,dict) and r3:
+            r3["developer"]=config.DEVELOPER
+            r3["_developer"]=config.DEVELOPER
+            sources["truecaller"]=r3
+    if not sources:
+        result={
+            "developer":config.DEVELOPER,
+            "query":num,
+            "status":"not_found",
+            "sources":{},
+            "raw_json":json.dumps({"developer":config.DEVELOPER,"status":"not_found","query":num},indent=2,ensure_ascii=False)
+        }
+        return result
+    # Build raw JSON with developer name everywhere
+    json_data={"developer":config.DEVELOPER,"query":num,"status":"success"}
+    for src_name,src_data in sources.items():
+        json_data[src_name]=src_data
+    result={
+        "developer":config.DEVELOPER,
+        "query":num,
+        "status":"success",
+        "sources":sources,
+        "raw_json":json.dumps(json_data,indent=2,ensure_ascii=False,default=str)
+    }
+    return result
+
+async def format_output(result):
+    if result["status"]=="protected":
+        return (f"🔍 *DKINT Search Results*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"**Developer:** {config.DEVELOPER}\n"
+                f"**Query:** `{result['query']}`\n"
+                f"**Status:** ❌ Not Found\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"records found in any source.\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📱 {config.DEVELOPER}\n"
+                f"⏱️ *This message will be deleted in {config.AUTO_DELETE_SECONDS}s*")
+    if result["status"]=="not_found":
+        return (f"🔍 *DKINT Search Results*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"**Developer:** {config.DEVELOPER}\n"
+                f"**Query:** `{result['query']}`\n"
+                f"**Status:** ❌ Not Found\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"No records found in any source.\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📱 {config.DEVELOPER}\n"
+                f"⏱️ *This message will be deleted in {config.AUTO_DELETE_SECONDS}s*")
+    sections=[]
+    q=result['query']
+    sections.append(f"🔍 *DKINT Search Results*")
+    sections.append(f"━━━━━━━━━━━━━━━━━━━━━")
+    sections.append(f"**Developer:** {config.DEVELOPER}")
+    sections.append(f"**Query:** `{q}`")
+    sections.append(f"**Status:** ✅ Success")
+    sections.append(f"━━━━━━━━━━━━━━━━━━━━━")
+    sources=result.get("sources",{})
+    if "csv_database" in sources:
+        sections.append(f"🗄️ *CSV Database* ({len(sources['csv_database'])} records)")
+        sections.append("─────────────────────────")
+        for i,rec in enumerate(sources["csv_database"],1):
+            sections.append(f"*Record #{i}*")
+            sections.append(fmt_record(rec))
+            if i<len(sources["csv_database"]): sections.append("")
+    if "api_v1" in sources:
+        sections.append(f"\n🌐 *API v1*")
+        sections.append("─────────────────────────")
+        sections.append(fmt_record(sources["api_v1"]))
+    if "api_v2" in sources:
+        sections.append(f"\n🔗 *API v2* ({len(sources['api_v2'])} records)")
+        sections.append("─────────────────────────")
+        for i,rec in enumerate(sources["api_v2"],1):
+            sections.append(f"*Record #{i}*")
+            sections.append(fmt_record(rec))
+            if i<len(sources["api_v2"]): sections.append("")
+    if "truecaller" in sources:
+        sections.append(f"\n📞 *Truecaller*")
+        sections.append("─────────────────────────")
+        sections.append(fmt_record(sources["truecaller"]))
+    sections.append("\n━━━━━━━━━━━━━━━━━━━━━")
+    sections.append(f"📱 *Full JSON Output (copyable):*")
+    sections.append(f"```json\n{result['raw_json']}\n```")
+    sections.append(f"━━━━━━━━━━━━━━━━━━━━━")
+    sections.append(f"📱 {config.DEVELOPER}")
+    sections.append(f"⏱️ *This message will be deleted in {config.AUTO_DELETE_SECONDS}s*")
+    return "\n".join(sections)
 
 router=Router()
 @router.startup()
@@ -235,43 +314,42 @@ async def startup(bot):
 async def start(message,command:CommandObject):
     uid=message.from_user.id
     if uid in authorized_users:
-        await message.reply("✅ *Already Authorized*\n\nUse `/num <phone_number>` to search.\nExample: `/num 9876543210`",parse_mode="Markdown")
+        await message.reply(f"✅ *Already Authorized*\n\nUse `/num <phone_number>` to search.\nExample: `/num 9876543210`\n\n📱 {config.DEVELOPER}",parse_mode="Markdown")
         return
     pw=(command.args or "").strip()
     if not pw:
-        await message.reply(f"🔐 *Password Required*\n\nSend `/start <password>` to authorize.\nContact developer for password.",parse_mode="Markdown")
+        await message.reply(f"🔐 *Password Required*\n\nSend `/start <password>` to authorize.\nContact {config.DEVELOPER} for password.",parse_mode="Markdown")
         return
     if pw!=config.BOT_PASSWORD:
         await message.reply("❌ *Wrong Password*\n\nPlease try again with the correct password.",parse_mode="Markdown")
         return
     authorized_users.add(uid)
     save_auth()
-    await message.reply("✅ *Authorized!* 🎉\n\nYou now have access.\nUse `/num <phone_number>` to search.\nExample: `/num 9876543210`",parse_mode="Markdown")
+    await message.reply(f"✅ *Authorized!* 🎉\n\nYou now have access.\nUse `/num <phone_number>` to search.\nExample: `/num 9876543210`\n\n📱 {config.DEVELOPER}",parse_mode="Markdown")
 
 @router.message(Command("num"))
 async def num(message,bot):
     uid=message.from_user.id
     if uid not in authorized_users:
-        await message.reply("🔐 *Not Authorized*\n\nSend `/start <password>` in DM first.",parse_mode="Markdown")
+        await message.reply(f"🔐 *Not Authorized*\n\nSend `/start <password>` in DM first.\n📱 {config.DEVELOPER}",parse_mode="Markdown")
         return
     args=message.text.split(maxsplit=1)
     if len(args)<2:
-        await message.reply("❌ *Usage:* `/num <phone_number>`\nExample: `/num 9876543210`",parse_mode="Markdown")
+        await message.reply(f"❌ *Usage:* `/num <phone_number>`\nExample: `/num 9876543210`\n📱 {config.DEVELOPER}",parse_mode="Markdown")
         return
     number=clean_num(args[1])
     if not number or len(number)<10:
-        await message.reply("❌ *Invalid Number*\nPlease provide a valid 10-digit phone number.",parse_mode="Markdown")
+        await message.reply(f"❌ *Invalid Number*\nPlease provide a valid 10-digit phone number.\n📱 {config.DEVELOPER}",parse_mode="Markdown")
         return
-    status=await message.reply(f"🔍 Processing {number}...")
+    status=await message.reply(f"🔍 Processing `{number}`...\n📱 {config.DEVELOPER}",parse_mode="Markdown")
     try: result=await search_all(number)
     except Exception as e:
         logger.error(f"Search error: {e}")
-        await status.edit_text(f"❌ *Search Failed*\n\nAn error occurred.\nContact {config.DEVELOPER_TAG}")
+        await status.edit_text(f"❌ *Search Failed*\n\nAn error occurred.\n📱 {config.DEVELOPER}",parse_mode="Markdown")
         return
-    json_str=json.dumps(result,indent=2,ensure_ascii=False,default=str)
-    output=f"```json\n{json_str}\n```"
-    await status.delete()
-    sent=await message.reply(output,parse_mode="Markdown")
+    output=await format_output(result)
+    await status.edit_text(output,parse_mode="Markdown")
+    sent=status
     await asyncio.sleep(config.AUTO_DELETE_SECONDS)
     try: await bot.delete_message(message.chat.id,sent.message_id)
     except: pass
